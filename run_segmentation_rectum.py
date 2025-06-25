@@ -35,7 +35,7 @@ import scipy.ndimage.morphology as snm
 import skimage
 
 
-from monai.transforms import MapTransform. ##add
+from monai.transforms import MapTransform ##add
 
 class PercentileClipRescale(MapTransform):
     def __init__(self, keys, percentile=99.5, rescale_max=1000):
