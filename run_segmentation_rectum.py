@@ -122,7 +122,7 @@ parser.add_argument('--load_weight_name', default='a', type=str, help='trained_w
 parser.add_argument('--save_folder', default='a', type=str, help='output_folder')
 parser.add_argument('--model_feature', default=96, type=int, help='model_imbeding_feature size')
 parser.add_argument('--scale_intensity', action='store_true', help='')
-parser.add_argument('--use_smit', default=0, type=int, help='use smit model')
+parser.add_argument('--use_smit', default=1, type=int, help='use smit model')
 parser.add_argument('--num_workers', default=0, type=int, help='set number of workers for pytorch dataloader')
 
 
