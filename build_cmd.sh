@@ -24,9 +24,11 @@ fi
 
 if [ -z "${TMPDIR}" ]
 then
-	TMPDIR="/singularity"
+	export TMPDIR="/singularity"
 fi
 
+export APPTAINER_CACHEDIR=${TMPDIR}
+export APPTAINER_TMPDIR=${TMPDIR}
 
 #get repo name for SIF filename
 REPOREMOTE=`git config --get remote.origin.url`
@@ -43,8 +45,8 @@ SIFOUT="${REPONAME}_`basename ${SINGRECIPE}`_${IDSTAMP}.sif"
 
 
 #build the container
-singularity build --tmpdir ${TMPDIR} ${SIFOUT} ${SINGRECIPE}
-
+#singularity build --tmpdir ${TMPDIR} ${SIFOUT} ${SINGRECIPE}
+apptainer build ${SIFOUT} ${SINGRECIPE}
 
 #set container file to be executable
 chmod 775 ${SIFOUT}
