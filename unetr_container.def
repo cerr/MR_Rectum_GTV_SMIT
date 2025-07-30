@@ -35,7 +35,7 @@ From: nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
 	cp -r smit_models ${SINGULARITY_ROOTFS}
 	cp -r utils ${SINGULARITY_ROOTFS}
 	cp -r trained_weights ${SINGULARITY_ROOTFS}
-	cp -r requirements
+	cp -r requirements ${SINGULARITY_ROOTFS}
 %post
         #Post-setup script
 
