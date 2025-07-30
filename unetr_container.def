@@ -1,0 +1,136 @@
+Bootstrap: docker
+From: nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
+
+%environment
+        ### Environment variables
+
+        #Use bash as default shell
+        SHELL=/bin/bash
+
+        #Add nvidia driver paths
+        #PATH="/nvbin:$PATH"
+        #LD_LIBRARY_PATH="/nvlib:$LD_LIBRARY_PATH"
+
+        #Add uv to path
+        PATH="/root/.local/bin/uv:$PATH"
+        LD_LIBRARY_PATH="/usr/local/cuda/lib64/stubs:/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+        LD_LIBRARY_PATH="/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+	CUDA_HOME="/usr/local/cuda"
+
+        #Add Python/conda paths
+        #PATH=/miniconda3/bin:/miniconda3/condabin:$PATH
+        #PYTHONPATH=/software/model_wrapper:/miniconda3/bin
+
+	DEBIAN_FRONTEND="noninteractive" 
+        TZ="America/New_York"
+
+        export PATH CPATH CUDA_HOME LD_LIBRARY_PATH DEBIAN_FRONTEND TZ #PYTHONPATH
+
+%setup
+        #Runs on host, path to the image / is $SINGULARITY_ROOTFS
+        cp bash_run_SMIT_Segmentation.sh ${SINGULARITY_ROOTFS}
+        cp run_segmentation_rectum.py ${SINGULARITY_ROOTFS}
+	cp pycerr_convert.py ${SINGULARITY_ROOTFS}
+	cp GTV.json ${SINGULARITY_ROOTFS}
+	cp -r smit_models ${SINGULARITY_ROOTFS}
+	cp -r utils ${SINGULARITY_ROOTFS}
+	cp -r trained_weights ${SINGULARITY_ROOTFS}
+	cp -r requirements
+%post
+        #Post-setup script
+
+	. /environment
+	
+	ls /
+
+        ### Create default mount paths
+        mkdir -vp /scratch /software /build
+
+	cd /scratch && mkdir dicom nifti rtstruct
+	mv /bash_run_SMIT_Segmentation.sh /software
+	mv /*.py /software
+	mv /GTV.json /software
+
+	mv /smit_models /software
+	mv /trained_weights /software
+	mv /requirements /software
+	mv /utils /software
+
+        # Update repos
+        apt-get update
+
+        export TZ="America/New_York"
+        export DEBIAN_FRONTEND="noninteractive"
+
+	apt-get install -y tzdata
+	apt-get upgrade -y
+        apt-get install -y wget unzip zip nano ffmpeg libsm6 libxext6
+
+
+        ### Install uv
+	wget -qO- https://astral.sh/uv/install.sh | sh
+
+	which uv
+
+	## Set up pycerr env
+	uv venv --python-preference only-managed -p 3.11 /software/.pycerr
+	uv pip install -n -p /software/.pycerr "git+https://github.com/cerr/pycerr.git"
+
+	## Set up unetr env
+	uv venv --python-preference only-managed -p 3.9 /software/.unetr
+	uv pip install -n -p /software/.unetr /software/requirements/r1.txt
+        uv pip install -n -p /software/.unetr /software/requirements/r2.txt
+
+
+##############################
+# UNETR / MR_Rectum_GTV_SMIT
+##############################
+
+%apprun get_hash
+    cat /hash_id.txt
+
+%apprun MR_Rectum_GTV_SMIT
+	cd /software && uv run -p .pycerr python pycerr_convert.sh dcm2nii /scratch/dicom /scratch/nifti/img.nii 
+	cd /software && uv run -p .unetr sh bash_run_SMIT_Segmentation.sh /scratch/nifti /scratch/nifti /software/trained_weights/model_final.pt
+	cd /software && uv run -p .pycerr python pycerr_convert.sh mask2rtstruct /scratch/dicom /scratch/nifti/model_img.nii /scratch/output /software/GTV.json
+
+%apprun MR_Rectum_GTV_SMIT_NII
+	cd /software && uv run -p .unetr sh bash_run_SMIT_Segmentation.sh /scratch/nifti /scratch/nifti /software/trained_weights/model_final.pt
+
+
+#apprun export
+#    cd /software && python mermaid_out_to_cb_space.py $1
+
+
+##############################
+
+
+#%test
+        #Test script to run after building container
+#	. /environment
+#        python -c "import torch; print(torch.cuda.is_available())"
+
+
+%labels
+    AUTHOR EM LoCastro (locastre@mskcc.org)
+    SINGULARITY_VERSION v5.3
+
+
+%help
+
+By downloading the software for model implementations in CERR and Singularity containers, you are agreeing to the following terms and conditions as well as to the Terms of Use of CERR software.
+
+    THE SOFTWARE IS PROVIDED ?AS IS,? AND CERR DEVELOPMENT TEAM AND ITS COLLABORATORS DO NOT MAKE ANY WARRANTY, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE, NOR DO THEY ASSUME ANY LIABILITY OR RESPONSIBILITY FOR THE USE OF THIS SOFTWARE.
+
+    This software is for research purposes only and has not been approved for clinical use.
+
+    Software has not been reviewed or approved by the Food and Drug Administration, and is for non-clinical, IRB-approved Research Use Only. In no event shall data or images generated through the use of the Software be used in the provision of patient care.
+
+    You may publish papers and books using results produced using software provided that you reference the appropriate citations
+
+    YOU MAY NOT DISTRIBUTE COPIES of this software, or copies of software derived from this software, to others outside your organization without specific prior written permission from the CERR development team except where noted for specific software products.
+
+    All Technology and technical data delivered under this Agreement are subject to US export control laws and may be subject to export or import regulations in other countries. You agree to comply strictly with all such laws and regulations and acknowledge that you have the responsibility to obtain such licenses to export, re-export, or import as may be required after delivery to you.l
+
+%runscript
+    exec "$@"
