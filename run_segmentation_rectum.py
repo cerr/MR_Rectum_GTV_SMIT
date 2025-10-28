@@ -237,7 +237,7 @@ def main():
         config = CONFIGS_SMIT['SMIT_config']
         model = smit.SMIT_3D_Seg(config,
                                  out_channels=args.out_channels,
-                                 norm_name='batch')
+                                 norm_name='instance')
     else:
         model = smit_plus.SMIT_Plus(out_channels=args.out_channels,
                                     in_channels=args.in_channels,
@@ -295,3 +295,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
