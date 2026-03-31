@@ -7,8 +7,7 @@ from timm.models.layers import DropPath, trunc_normal_, to_3tuple
 from torch.distributions.normal import Normal
 import torch.nn.functional as nnf
 import numpy as np
-import smit_models.configs_smit as configs
-
+# import models.configs_smit as configs
 from monai.networks.blocks import UnetrBasicBlock, UnetrPrUpBlock, UnetrUpBlock#,UnetrUpOnlyBlock
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 
@@ -25,59 +24,10 @@ import torch.nn as nn
 
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from typing import Optional
+import torch.nn.functional as F
+from collections import OrderedDict
+import os
 
-class UnetrUpOnlyBlock(nn.Module):
-   
-
-    def __init__(
-        self,
-        spatial_dims: int,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: Union[Sequence[int], int],
-        upsample_kernel_size: Union[Sequence[int], int],
-        norm_name: Union[Tuple, str],
-        res_block: bool = False,
-    ) -> None:
-        
-
-        super(UnetrUpOnlyBlock, self).__init__()
-        upsample_stride = upsample_kernel_size
-        self.transp_conv = get_conv_layer(
-            spatial_dims,
-            in_channels,
-            out_channels,
-            kernel_size=upsample_kernel_size,
-            stride=upsample_stride,
-            conv_only=True,
-            is_transposed=True,
-        )
-
-        if res_block:
-            self.conv_block = UnetResBlock(
-                spatial_dims,
-                out_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=1,
-                norm_name=norm_name,
-            )
-        else:
-            self.conv_block = UnetBasicBlock(  # type: ignore
-                spatial_dims,
-                out_channels,# + out_channels,
-                out_channels,
-                kernel_size=kernel_size,
-                stride=1,
-                norm_name=norm_name,
-            )
-
-    def forward(self, inp):
-        
-        out = self.transp_conv(inp)
-        
-        out = self.conv_block(out)
-        return out
     
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -186,8 +136,8 @@ class SwinTransformerBlock(nn.Module):
     
 
     def __init__(self, dim, num_heads, window_size=(7, 7, 7), shift_size=(0, 0, 0),
-                 mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
+                  act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -309,20 +259,20 @@ class BasicLayer(nn.Module):
     
 
     def __init__(self,
-                 dim,
-                 depth,
-                 num_heads,
-                 window_size=(7, 7, 7),
-                 mlp_ratio=4.,
-                 qkv_bias=True,
-                 qk_scale=None,
-                 drop=0.,
-                 attn_drop=0.,
-                 drop_path=0.,
-                 norm_layer=nn.LayerNorm,
-                 downsample=None,
-                 use_checkpoint=False,
-                 pat_merg_rf=2,):
+                  dim,
+                  depth,
+                  num_heads,
+                  window_size=(7, 7, 7),
+                  mlp_ratio=4.,
+                  qkv_bias=True,
+                  qk_scale=None,
+                  drop=0.,
+                  attn_drop=0.,
+                  drop_path=0.,
+                  norm_layer=nn.LayerNorm,
+                  downsample=None,
+                  use_checkpoint=False,
+                  pat_merg_rf=2,):
         super().__init__()
         self.window_size = window_size
         self.shift_size = (window_size[0] // 2, window_size[1] // 2, window_size[2] // 2)
@@ -475,23 +425,6 @@ class PatchEmbed(nn.Module):
 
         return x
 
-class SinusoidalPositionEmbedding(nn.Module):
-    '''
-    Rotary Position Embedding
-    '''
-    def __init__(self,):
-        super(SinusoidalPositionEmbedding, self).__init__()
-
-    def forward(self, x):
-        batch_sz, n_patches, hidden = x.shape
-        position_ids = torch.arange(0, n_patches).float().cuda()
-        indices = torch.arange(0, hidden//2).float().cuda()
-        indices = torch.pow(10000.0, -2 * indices / hidden)
-        embeddings = torch.einsum('b,d->bd', position_ids, indices)
-        embeddings = torch.stack([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
-        embeddings = torch.reshape(embeddings, (1, n_patches, hidden))
-        return embeddings
-
 class SinPositionalEncoding3D(nn.Module):
     def __init__(self, channels):
         """
@@ -530,180 +463,8 @@ class SinPositionalEncoding3D(nn.Module):
         emb = emb[None,:,:,:,:orig_ch].repeat(batch_size, 1, 1, 1, 1)
         return emb.permute(0, 4, 1, 2, 3)
 
-class SwinTransformer(nn.Module):
-    
-
-    def __init__(self, pretrain_img_size=224,
-                 patch_size=4,
-                 in_chans=3,
-                 embed_dim=96,
-                 depths=[2, 2, 6, 2],
-                 num_heads=[3, 6, 12, 24],
-                 window_size=(7, 7, 7),
-                 mlp_ratio=4.,
-                 qkv_bias=True,
-                 qk_scale=None,
-                 drop_rate=0.,
-                 attn_drop_rate=0.,
-                 drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm,
-                 ape=False,
-                 spe=False,
-                 patch_norm=True,
-                 out_indices=(0, 1, 2, 3),
-                 frozen_stages=-1,
-                 use_checkpoint=False,
-                 pat_merg_rf=2,):
-        super().__init__()
-        self.pretrain_img_size = pretrain_img_size
-        self.num_layers = len(depths)
-        self.embed_dim = embed_dim
-        self.ape = ape
-        self.spe = spe
-        self.patch_norm = patch_norm
-        self.out_indices = out_indices
-        self.frozen_stages = frozen_stages
-        
-        self.patch_embed = PatchEmbed(
-            patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
-
-        # absolute position embedding
-        if self.ape:
-            pretrain_img_size = to_3tuple(self.pretrain_img_size)
-            patch_size = to_3tuple(patch_size)
-            patches_resolution = [pretrain_img_size[0] // patch_size[0], pretrain_img_size[1] // patch_size[1], pretrain_img_size[2] // patch_size[2]]
-
-            self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1], patches_resolution[2]))
-            trunc_normal_(self.absolute_pos_embed, std=.02)
-            #self.pos_embd = SinPositionalEncoding3D(96).cuda()#SinusoidalPositionEmbedding().cuda()
-        elif self.spe:
-            self.pos_embd = SinPositionalEncoding3D(embed_dim).cuda()
-            #self.pos_embd = SinusoidalPositionEmbedding().cuda()
-        self.pos_drop = nn.Dropout(p=drop_rate)
-
-        # stochastic depth
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
-
-        # build layers
-        self.layers = nn.ModuleList()
-        for i_layer in range(self.num_layers):
-            layer = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
-                                depth=depths[i_layer],
-                                num_heads=num_heads[i_layer],
-                                window_size=window_size,
-                                mlp_ratio=mlp_ratio,
-                                qkv_bias=qkv_bias,
-                                qk_scale=qk_scale,
-                                drop=drop_rate,
-                                attn_drop=attn_drop_rate,
-                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
-                                norm_layer=norm_layer,
-                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
-                                use_checkpoint=use_checkpoint,
-                               pat_merg_rf=pat_merg_rf,)
-            self.layers.append(layer)
-
-        num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
-        self.num_features = num_features
-
-        # add a norm layer for each output
-        for i_layer in out_indices:
-            layer = norm_layer(num_features[i_layer])
-            layer_name = f'norm{i_layer}'
-            self.add_module(layer_name, layer)
-
-        self._freeze_stages()
-
-    def _freeze_stages(self):
-        if self.frozen_stages >= 0:
-            self.patch_embed.eval()
-            for param in self.patch_embed.parameters():
-                param.requires_grad = False
-
-        if self.frozen_stages >= 1 and self.ape:
-            self.absolute_pos_embed.requires_grad = False
-
-        if self.frozen_stages >= 2:
-            self.pos_drop.eval()
-            for i in range(0, self.frozen_stages - 1):
-                m = self.layers[i]
-                m.eval()
-                for param in m.parameters():
-                    param.requires_grad = False
-
-    def init_weights(self, pretrained=None):
-        """Initialize the weights in backbone.
-        Args:
-            pretrained (str, optional): Path to pre-trained weights.
-                Defaults to None.
-        """
-
-        def _init_weights(m):
-            if isinstance(m, nn.Linear):
-                trunc_normal_(m.weight, std=.02)
-                if isinstance(m, nn.Linear) and m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.LayerNorm):
-                nn.init.constant_(m.bias, 0)
-                nn.init.constant_(m.weight, 1.0)
-
-        if isinstance(pretrained, str):
-            self.apply(_init_weights)
-        elif pretrained is None:
-            self.apply(_init_weights)
-        else:
-            raise TypeError('pretrained must be a str or None')
-
-    def forward(self, x):
-        """Forward function."""
-        #print ('before patch embd x size is ',x.size())
-        x = self.patch_embed(x)
-        
-
-        Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
-
-        if self.ape:
-            # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = nnf.interpolate(self.absolute_pos_embed, size=(Wh, Ww, Wt), mode='trilinear')
-            x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww*Wt C
-        elif self.spe:
-            x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
-        else:
-            x = x.flatten(2).transpose(1, 2)
-        x = self.pos_drop(x)
-
-        outs = []
-        #print ('there are steps numbers ',self.num_layers)
-        #print ('x size is  ',x.size())
-        for i in range(self.num_layers):
-            #print ('stage ',i)
-            layer = self.layers[i]
-            #print ('before X size is ', x.size())
-            x_out, H, W, T, x, Wh, Ww, Wt = layer(x, Wh, Ww, Wt)
-            if i in self.out_indices:
-                norm_layer = getattr(self, f'norm{i}')
-                x_out = norm_layer(x_out)
-
-                out = x_out.view(-1, H, W, T, self.num_features[i]).permute(0, 4, 1, 2, 3).contiguous()
-                
-                #print ('after out size is ', out.size())
-                outs.append(out)
-            #print ('after X size is ', x.size())
-            
-        return outs
-
-    def train(self, mode=True):
-        """Convert the model into training mode while keep layers freezed."""
-        super(SwinTransformer, self).train(mode)
-        self._freeze_stages()
-
-
-
 class UnetResBlock_No_Downsampleing(nn.Module):
    
-
     def __init__(
         self,
         spatial_dims: int,
@@ -788,31 +549,30 @@ class UnetrBasicBlock_No_DownSampling(nn.Module):
     def forward(self, inp):
         return self.layer(inp)
 
-
 class SwinTransformer_(nn.Module):
    
-
     def __init__(self, pretrain_img_size=128,
-                 patch_size=2,
-                 in_chans=3,
-                 embed_dim=96,
-                 depths=[2, 2, 6, 2],
-                 num_heads=[3, 6, 12, 24],
-                 window_size=(7, 7, 7),
-                 mlp_ratio=4.,
-                 qkv_bias=True,
-                 qk_scale=None,
-                 drop_rate=0.,
-                 attn_drop_rate=0.,
-                 drop_path_rate=0.2,
-                 norm_layer=nn.LayerNorm,
-                 ape=False,
-                 spe=False,
-                 patch_norm=True,
-                 out_indices=(0, 1, 2, 3),
-                 frozen_stages=-1,
-                 use_checkpoint=False,
-                 pat_merg_rf=2,):
+                  patch_size=2,
+                  in_chans=3,
+                  embed_dim=96,
+                  depths=[2, 2, 6, 2],
+                  num_heads=[3, 6, 12, 24],
+                  window_size=(7, 7, 7),
+                  mlp_ratio=4.,
+                  qkv_bias=True,
+                  qk_scale=None,
+                  drop_rate=0.,
+                  attn_drop_rate=0.,
+                  drop_path_rate=0.2,
+                  norm_layer=nn.LayerNorm,
+                  ape=False,
+                  spe=False,
+                  patch_norm=True,
+                  out_indices=(0, 1, 2, 3),
+                  frozen_stages=-1,
+                  use_checkpoint=False,
+                  pat_merg_rf=2,
+                  exclude_last_downsample=False):
         super().__init__()
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
@@ -827,23 +587,11 @@ class SwinTransformer_(nn.Module):
             patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None)
 
-        # absolute position embedding
-        if self.ape:
-            pretrain_img_size = to_3tuple(self.pretrain_img_size)
-            patch_size = to_3tuple(patch_size)
-            patches_resolution = [pretrain_img_size[0] // patch_size[0], pretrain_img_size[1] // patch_size[1], pretrain_img_size[2] // patch_size[2]]
-
-            self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, embed_dim, patches_resolution[0], patches_resolution[1], patches_resolution[2]))
-            trunc_normal_(self.absolute_pos_embed, std=.02)
-            #self.pos_embd = SinPositionalEncoding3D(96).cuda()#SinusoidalPositionEmbedding().cuda()
-        elif self.spe:
-            self.pos_embd = SinPositionalEncoding3D(embed_dim).cuda()
-            #self.pos_embd = SinusoidalPositionEmbedding().cuda()
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         # stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+        last_ok = (self.num_layers - 1) if exclude_last_downsample else self.num_layers
 
         # build layers
         self.layers = nn.ModuleList()
@@ -859,9 +607,9 @@ class SwinTransformer_(nn.Module):
                                 attn_drop=attn_drop_rate,
                                 drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                 norm_layer=norm_layer,
-                                downsample=PatchMerging if (i_layer < self.num_layers) else None,
+                                downsample=PatchMerging if (i_layer < last_ok) else None,
                                 use_checkpoint=use_checkpoint,
-                               pat_merg_rf=pat_merg_rf,)
+                                pat_merg_rf=pat_merg_rf,)
             self.layers.append(layer)
 
         num_features = [int(embed_dim * 2 ** i) for i in range(self.num_layers)]
@@ -881,7 +629,7 @@ class SwinTransformer_(nn.Module):
             for param in self.patch_embed.parameters():
                 param.requires_grad = False
 
-        if self.frozen_stages >= 1 and self.ape:
+        if self.frozen_stages >= 1 and getattr(self, "absolute_pos_embed", None) is not None:
             self.absolute_pos_embed.requires_grad = False
 
         if self.frozen_stages >= 2:
@@ -923,14 +671,7 @@ class SwinTransformer_(nn.Module):
 
         Wh, Ww, Wt = x.size(2), x.size(3), x.size(4)
 
-        if self.ape:
-            # interpolate the position embedding to the corresponding size
-            absolute_pos_embed = nnf.interpolate(self.absolute_pos_embed, size=(Wh, Ww, Wt), mode='trilinear')
-            x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww*Wt C
-        elif self.spe:
-            x = (x + self.pos_embd(x)).flatten(2).transpose(1, 2)
-        else:
-            x = x.flatten(2).transpose(1, 2)
+        x = x.flatten(2).transpose(1, 2)
         x = self.pos_drop(x)
 
         outs = []
@@ -957,6 +698,88 @@ class SwinTransformer_(nn.Module):
         
         super(SwinTransformer_, self).train(mode)
         self._freeze_stages()
+        
+# =====================================================
+# UPerNet Components for 3D
+# =====================================================
+
+class PPM3D(nn.Module):
+    """Pyramid Pooling Module for 3D"""
+    def __init__(self, in_channels, pool_scales=(1, 2, 3, 6), channels=512, 
+                 spatial_dims=3, norm_name="batch"):
+        super().__init__()
+        self.stages = nn.ModuleList()
+        for scale in pool_scales:
+            # Skip normalization for scale=1 to avoid instance norm error
+            if scale == 1:
+                self.stages.append(nn.Sequential(
+                    nn.AdaptiveAvgPool3d(output_size=scale),
+                    get_conv_layer(spatial_dims, in_channels, channels, kernel_size=1, conv_only=True),
+                    nn.ReLU(inplace=True)
+                ))
+            else:
+                self.stages.append(nn.Sequential(
+                    nn.AdaptiveAvgPool3d(output_size=scale),
+                    get_conv_layer(spatial_dims, in_channels, channels, kernel_size=1, conv_only=True),
+                    get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=channels),
+                    nn.ReLU(inplace=True)
+                ))
+        self.bottleneck = nn.Sequential(
+            get_conv_layer(spatial_dims, in_channels + len(pool_scales) * channels, channels, kernel_size=3, conv_only=True),
+            get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        ppm_outs = [x]
+        for stage in self.stages:
+            ppm_outs.append(F.interpolate(stage(x), size=x.shape[2:], mode='trilinear', align_corners=False))
+        return self.bottleneck(torch.cat(ppm_outs, dim=1))
+
+
+class FPN3D(nn.Module):
+    """Feature Pyramid Network for 3D"""
+    def __init__(self, in_channels_list, out_channels, spatial_dims=3, norm_name="batch"):
+        super().__init__()
+        self.lateral_convs = nn.ModuleList()
+        self.fpn_convs = nn.ModuleList()
+        for in_ch in in_channels_list:
+            self.lateral_convs.append(nn.Sequential(
+                get_conv_layer(spatial_dims, in_ch, out_channels, kernel_size=1, conv_only=True),
+                get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=out_channels),
+                nn.ReLU(inplace=True)))
+            self.fpn_convs.append(nn.Sequential(
+                get_conv_layer(spatial_dims, out_channels, out_channels, kernel_size=3, conv_only=True),
+                get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=out_channels),
+                nn.ReLU(inplace=True)))
+    
+    def forward(self, features):
+        laterals = [l(f) for l, f in zip(self.lateral_convs, features)]
+        for i in range(len(laterals) - 1, 0, -1):
+            laterals[i-1] = laterals[i-1] + F.interpolate(laterals[i], size=laterals[i-1].shape[2:], mode='trilinear', align_corners=False)
+        return [fpn(lat) for fpn, lat in zip(self.fpn_convs, laterals)]
+
+
+class UPerHead3D(nn.Module):
+    """UPerNet Head for 3D segmentation"""
+    def __init__(self, in_channels_list, channels, pool_scales=(1, 2, 3, 6), 
+                 spatial_dims=3, norm_name="batch"):
+        super().__init__()
+        self.ppm = PPM3D(in_channels_list[-1], pool_scales=pool_scales, channels=channels,
+                         spatial_dims=spatial_dims, norm_name=norm_name)
+        self.fpn = FPN3D(list(in_channels_list[:-1]) + [channels], channels,
+                         spatial_dims=spatial_dims, norm_name=norm_name)
+        self.fusion_conv = nn.Sequential(
+            get_conv_layer(spatial_dims, channels * len(in_channels_list), channels, kernel_size=3, conv_only=True),
+            get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=channels),
+            nn.ReLU(inplace=True))
+    
+    def forward(self, features):
+        ppm_out = self.ppm(features[-1])
+        fpn_outs = self.fpn(list(features[:-1]) + [ppm_out])
+        target_size = fpn_outs[0].shape[2:]
+        fused = torch.cat([fpn_outs[0]] + [F.interpolate(f, size=target_size, mode='trilinear', align_corners=False) for f in fpn_outs[1:]], dim=1)
+        return self.fusion_conv(fused)
     
 class SMIT_3D_Seg(nn.Module):
     def __init__(
@@ -966,7 +789,7 @@ class SMIT_3D_Seg(nn.Module):
         feature_size: int = 48,
         hidden_size: int = 768,
         mlp_dim: int = 3072,
-        img_size: int = 128,
+        img_size: tuple = None,
         num_heads: int = 12,
         pos_embed: str = "perceptron",
         norm_name: Union[Tuple, str] = "batch",
@@ -974,16 +797,30 @@ class SMIT_3D_Seg(nn.Module):
         res_block: bool = True,
         spatial_dims: int = 3,
         in_channels: int=1,
-       
+
     ) -> None:
        
         super().__init__()
-        self.hidden_size = hidden_size
-        self.feat_size=(img_size//32,img_size//32,img_size//32)
         
-        embed_dim = 96#config.embed_dim
+        self.exclude_last_downsample = getattr(config, 'exclude_last_downsample', False)
+        if self.exclude_last_downsample:
+            raise NotImplementedError("exclude_last_downsample=True is not yet implemented")
+            
+        if img_size is not None:
+            self.img_size = img_size if isinstance(img_size, (tuple, list)) else (img_size, img_size, img_size)
+        else:
+            self.img_size = config.img_size
+    
+        self.hidden_size = hidden_size
+        self.decoder_type = getattr(config, 'decoder_type', 'unetr')
+
+        self.feat_size=(self.img_size[0]//32,
+                        self.img_size[1]//32,
+                        self.img_size[2]//32
+                        )
+        
         self.transformer = SwinTransformer_(patch_size=config.patch_size,
-                                           pretrain_img_size=config.img_size[0],
+                                           pretrain_img_size=self.img_size,
                                            in_chans=config.in_chans,
                                            embed_dim=config.embed_dim,
                                            depths=config.depths,
@@ -1041,7 +878,17 @@ class SMIT_3D_Seg(nn.Module):
             norm_name=norm_name,
             res_block=True,
         )
-
+        
+        self.encoder5 = UnetrBasicBlock_No_DownSampling(
+            spatial_dims=spatial_dims,
+            in_channels=8 * feature_size,
+            out_channels=8 * feature_size,
+            kernel_size=3,
+            stride=1,
+            norm_name=norm_name,
+            res_block=True,
+        )
+    
         self.encoder10 = UnetrBasicBlock_No_DownSampling(
             spatial_dims=spatial_dims,
             in_channels=16 * feature_size,
@@ -1051,59 +898,88 @@ class SMIT_3D_Seg(nn.Module):
             norm_name=norm_name,
             res_block=True,
         )
-
-        self.decoder5 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=16 * feature_size,
-            out_channels=8 * feature_size,
-            kernel_size=3,
-            upsample_kernel_size=2,
-            norm_name=norm_name,
-            res_block=True,
-        )
-
-        self.decoder4 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 8,
-            out_channels=feature_size * 4,
-            kernel_size=3,
-            upsample_kernel_size=2,
-            norm_name=norm_name,
-            res_block=True,
-        )
-
-        self.decoder3 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 4,
-            out_channels=feature_size * 2,
-            kernel_size=3,
-            upsample_kernel_size=2,
-            norm_name=norm_name,
-            res_block=True,
-        )
-        self.decoder2 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 2,
-            out_channels=feature_size,
-            kernel_size=3,
-            upsample_kernel_size=2,
-            norm_name=norm_name,
-            res_block=True,
-        )
-
-        self.decoder1 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size,
-            out_channels=feature_size,
-            kernel_size=3,
-            upsample_kernel_size=2,
-            norm_name=norm_name,
-            res_block=True,
-        )
+        
+        if self.decoder_type == 'unetr':
+            self.decoder5 = UnetrUpBlock(
+                spatial_dims=spatial_dims,
+                in_channels=16 * feature_size,
+                out_channels=8 * feature_size,
+                kernel_size=3,
+                upsample_kernel_size=2,
+                norm_name=norm_name,
+                res_block=True,
+            )
+    
+            self.decoder4 = UnetrUpBlock(
+                spatial_dims=spatial_dims,
+                in_channels=8 * feature_size,
+                out_channels=4 * feature_size,
+                kernel_size=3,
+                upsample_kernel_size=2,
+                norm_name=norm_name,
+                res_block=True,
+            )
+    
+            self.decoder3 = UnetrUpBlock(
+                spatial_dims=spatial_dims,
+                in_channels=4 * feature_size,
+                out_channels=2 * feature_size,
+                kernel_size=3,
+                upsample_kernel_size=2,
+                norm_name=norm_name,
+                res_block=True,
+            )
+            
+            self.decoder2 = UnetrUpBlock(
+                spatial_dims=spatial_dims,
+                in_channels=2 * feature_size,
+                out_channels=feature_size,
+                kernel_size=3,
+                upsample_kernel_size=2,
+                norm_name=norm_name,
+                res_block=True,
+            )
+    
+            self.decoder1 = UnetrUpBlock(
+                spatial_dims=spatial_dims,
+                in_channels=feature_size,
+                out_channels=feature_size,
+                kernel_size=3,
+                upsample_kernel_size=2,
+                norm_name=norm_name,
+                res_block=True,
+            )
+            
+        elif self.decoder_type == 'upernet':
+            upernet_in_channels = [feature_size, 2*feature_size, 4*feature_size, 8*feature_size, 16*feature_size]
+            
+            self.upernet_head = UPerHead3D(
+                in_channels_list=upernet_in_channels, 
+                channels=feature_size, 
+                pool_scales=(1, 2, 3, 6),
+                spatial_dims=spatial_dims,
+                norm_name=norm_name,
+            )
+            
+            self.upernet_upsample = nn.Sequential(
+                get_conv_layer(spatial_dims, feature_size, feature_size, kernel_size=3, conv_only=True),
+                get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=feature_size),
+                nn.ReLU(inplace=True),
+                nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False),
+            )
+            
+            self.upernet_fusion = nn.Sequential(
+                get_conv_layer(spatial_dims, feature_size * 2, feature_size, kernel_size=3, conv_only=True),
+                get_norm_layer(name=norm_name, spatial_dims=spatial_dims, channels=feature_size),
+                nn.ReLU(inplace=True),
+            )
+        
+        else:
+            raise ValueError(f"Unknown decoder_type: {self.decoder_type}. Choose 'unetr' or 'upernet'.")
 
         self.out = UnetOutBlock(
             spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels
-        )  # type: ignore
+        )
 
     def proj_feat(self, x, hidden_size, feat_size):
         x = x.view(x.size(0), feat_size[0], feat_size[1], feat_size[2], hidden_size)
@@ -1111,50 +987,42 @@ class SMIT_3D_Seg(nn.Module):
         return x
 
     def forward(self, x_in):
-
         x, out_feats = self.transformer(x_in)
+        skip1, skip2, skip3, skip4 = out_feats
         
-
+        x0 = self.encoder1(x_in)
+        x1 = self.encoder2(skip1)
+        x2 = self.encoder3(skip2)
+        x3 = self.encoder4(skip3)
+        x4 = self.encoder5(skip4)
         
-
-
+        x5 = self.proj_feat(x, self.hidden_size, self.feat_size)
+        x5 = self.encoder10(x5)
         
+        if self.decoder_type == "unetr":
+            up5 = self.decoder5(x5, x4)
+            up4 = self.decoder4(up5, x3)
+            up3 = self.decoder3(up4, x2)
+            up2 = self.decoder2(up3, x1)
+            up1 = self.decoder1(up2, x0)
+            
+        else:  # upernet
+            features = [x1, x2, x3, x4, x5]
+            upernet_out = self.upernet_head(features)
+            up = self.upernet_upsample(upernet_out)
+            up1 = self.upernet_fusion(torch.cat([up, x0], dim=1))
         
+        return self.out(up1)
+        # return x, out_feats
 
-        enc44 = out_feats[-1]   # torch.Size([4, 384, 8, 8, 8])  
-        enc33 = out_feats[-2]   # torch.Size([4, 192, 16, 16, 16])
-        enc22 = out_feats[-3]   # torch.Size([4, 96, 32, 32, 32])   
-        enc11 = out_feats[-4]   # torch.Size([4, 48, 64, 64, 64])    
-        x=self.proj_feat(x, self.hidden_size, self.feat_size) # torch.Size([4, 768, 4, 4, 4])  
-
-       
-        enc0 = self.encoder1(x_in)
-        
-        enc1 = self.encoder2(enc11) #input size torch.Size([4, 96, 64, 64, 64])
-        
-        enc2 = self.encoder3(enc22) #input size torch.Size([4, 192, 32, 32, 32])
-       
-        enc3 = self.encoder4(enc33) #torch.Size([4, 384, 16, 16, 16])
-       
-
-        dec4 = self.encoder10(x)
-
-        dec3 = self.decoder5(dec4, enc44)
-        dec2 = self.decoder4(dec3, enc3)
-        dec1 = self.decoder3(dec2, enc2)
-        dec0 = self.decoder2(dec1, enc1)
-        out = self.decoder1(dec0, enc0)
-        logits = self.out(out)
-
-        
-
-        return logits
+if __name__ == "__main__":
+    import configs_smit
+    config1 = configs_smit.get_SMIT_128_bias_True()
     
-
-
-
-CONFIGS = {
-    'SMIT_config':configs.get_SMIT_128_bias_True(), 
-    'SMIT_config_cross_attention':configs.get_SMIT_128_bias_True_Cross(), 
+    model = SMIT_3D_Seg(config = config1, out_channels = 2, img_size = (128, 128, 64))
+    model.eval()
     
-}
+    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print("Total parameters count", pytorch_total_params)
+    
+    y = model(torch.Tensor(1, 1, 128, 128, 64))
