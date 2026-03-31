@@ -1,298 +1,427 @@
-import SimpleITK as sitk
-import os
-import torch
-import numpy as np
-from edit_inference_utils import sliding_window_inference
-from torch.cuda.amp import GradScaler, autocast
 import argparse
-from monai import transforms, data
-from monai.handlers.utils import from_engine
-from monai.data import decollate_batch, load_decathlon_datalist
-from monai.transforms import (
-    AsDiscrete,
-    AsDiscreted,
-    EnsureChannelFirstd,
-    Compose,
-    CropForegroundd,
-    SpatialPadd,
-    LoadImaged,
-    Orientationd,
-    RandCropByPosNegLabeld,
-    ScaleIntensityRanged,
-    Spacingd,
-    EnsureTyped,
-    EnsureType,
-    Invertd,
-)
+import os
+import re
 
-from smit_models.smit import CONFIGS as CONFIGS_SMIT
-import smit_models.smit as smit
-from smit_models import smit_plus
+import nibabel as nib
+import numpy as np
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+from torch.utils.data.distributed import DistributedSampler
+
+from monai import data, transforms
+from monai.data import load_decathlon_datalist, decollate_batch
+from monai.transforms import Flip
+from monai.inferers import sliding_window_inference
+from models import smit, configs_smit
+
+from tqdm import tqdm
 
 
-from skimage.measure import label 
-import scipy.ndimage.morphology as snm
-import skimage
+def get_key_name_part(path, min_len=4):
+    """Extract meaningful identifier from file path."""
+    fname = os.path.basename(path)
+    stem = fname.split('.')[0]
+    parent = os.path.basename(os.path.dirname(path))
+
+    if re.fullmatch(r"\d{4,}", stem):
+        return stem
+
+    throwaway = {"ctimg", "mrimg", "scan", "img", "image"}
+    if len(stem) < min_len or stem.lower() in throwaway:
+        return parent
+
+    return stem
 
 
-from monai.transforms import MapTransform ##add
+def make_seg_filename(path):
+    """Generate segmentation filename from input path."""
+    key = get_key_name_part(path)
+    return f"{key}_seg.nii.gz"
 
-class PercentileClipRescale(MapTransform):
-    def __init__(self, keys, percentile=99.5, rescale_max=1000):
-        super().__init__(keys)
-        self.percentile = percentile
-        self.rescale_max = rescale_max
 
-    def __call__(self, data):
-        d = dict(data)
-        for key in self.keys:
-            image = d[key]
-            # Assume image shape is (C, H, W, D) or (C, D, H, W) depending on data
-            image_np = image.astype(np.float32)
-            perc_val = np.percentile(image_np, self.percentile)
-            image_np = np.clip(image_np, a_min=None, a_max=perc_val)
-            image_np = (image_np / perc_val) * self.rescale_max
-            d[key] = image_np.astype(np.int16)
-        return d
+def list_of_strings(arg):
+    """Parse comma-separated string into list."""
+    return arg.split(',')
+
+
+def setup_argparser():
+    """Setup argument parser with all configuration options."""
+    parser = argparse.ArgumentParser(description="Unified SMIT segmentation pipeline with optional TTA and distributed inference")
     
-#def get_loader_v2(args):
-'''   
-    val_transform = transforms.Compose(
-        [
-            transforms.LoadImaged(keys=["image", "label"]),
-            transforms.AddChanneld(keys=["image", "label"]),
-            PercentileClipRescale(keys=["image"], percentile=99.5, rescale_max=1000),
-            transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
-            transforms.Spacingd(
-                keys=["image", "label"], pixdim=(args.space_x, args.space_y, args.space_z), mode=("bilinear", "nearest")
-            ),
-            transforms.ScaleIntensityRanged(
-                keys=["image"], a_min=args.a_min, a_max=args.a_max, b_min=args.b_min, b_max=args.b_max, clip=True
-            ),
-            transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
-            transforms.SpatialPadd(keys=["image","label"], spatial_size=(args.roi_x, args.roi_y, args.roi_z)),
-            transforms.ToTensord(keys=["image", "label"]),
-        ]
-    )
-'''
+    # Data arguments
+    parser.add_argument("--data_dir", default=None, type=str, help="dataset directory")
+    parser.add_argument("--json_list", default=None, type=str, help="dataset json file")
+    parser.add_argument("--datasets", default=None, type=list_of_strings, 
+                        help="comma-separated list of datasets to pull from json file")
+    parser.add_argument("--results_dir", default='results', type=str, help="main output directory")
+    parser.add_argument("--output_dir", default=None, type=str, help="secondary output directory")
 
-parser = argparse.ArgumentParser(description='UNETR segmentation pipeline')
-parser.add_argument('--pretrained_dir', default='./pretrained_models/', type=str,
-                    help='pretrained checkpoint directory')
-
-parser.add_argument('--data_dir', default='/scratch/input', type=str,
-                    help='dataset directory')
-parser.add_argument('--json_list',
-                    default='/scratch/input/data.json',
-                    type=str, help='dataset json file')
-
-parser.add_argument('--pretrained_model_name', default='model.pt', type=str,
-                    help='pretrained model name')
-parser.add_argument('--saved_checkpoint', default='ckpt', type=str,
-                    help='Supports torchscript or ckpt pretrained checkpoint type')
-parser.add_argument('--mlp_dim', default=3072, type=int, help='mlp dimention in ViT encoder')
-parser.add_argument('--hidden_size', default=768, type=int, help='hidden size dimention in ViT encoder')
-parser.add_argument('--feature_size', default=16, type=int, help='feature size dimention')
-parser.add_argument('--infer_overlap', default=0.5, type=float, help='sliding window inference overlap')
-parser.add_argument('--in_channels', default=1, type=int, help='number of input channels')
-parser.add_argument('--out_channels', default=1 + 6, type=int, help='number of output channels')
-parser.add_argument('--num_heads', default=12, type=int, help='number of attention heads in ViT encoder')
-parser.add_argument('--res_block', action='store_true', help='use residual blocks')
-parser.add_argument('--conv_block', action='store_true', help='use conv blocks')
-parser.add_argument('--a_min', default=-140, type=float, help='a_min in ScaleIntensityRanged')
-parser.add_argument('--a_max', default=260, type=float, help='a_max in ScaleIntensityRanged')
-parser.add_argument('--b_min', default=0.0, type=float, help='b_min in ScaleIntensityRanged')
-parser.add_argument('--b_max', default=1.0, type=float, help='b_max in ScaleIntensityRanged')
-parser.add_argument('--space_x', default=1.0, type=float, help='spacing in x direction')
-parser.add_argument('--space_y', default=1.0, type=float, help='spacing in y direction')
-parser.add_argument('--space_z', default=1.0, type=float, help='spacing in z direction')
-parser.add_argument('--roi_x', default=128, type=int, help='roi size in x direction')
-parser.add_argument('--roi_y', default=128, type=int, help='roi size in y direction')
-parser.add_argument('--roi_z', default=128, type=int, help='roi size in z direction')
-parser.add_argument('--dropout_rate', default=0.0, type=float, help='dropout rate')
-parser.add_argument('--distributed', action='store_true', help='start distributed training')
-parser.add_argument('--workers', default=8, type=int, help='number of workers')
-parser.add_argument('--RandFlipd_prob', default=0.8, type=float, help='RandFlipd aug probability')
-parser.add_argument('--RandRotate90d_prob', default=0.2, type=float, help='RandRotate90d aug probability')
-parser.add_argument('--RandScaleIntensityd_prob', default=0.1, type=float, help='RandScaleIntensityd aug probability')
-parser.add_argument('--RandShiftIntensityd_prob', default=0.1, type=float, help='RandShiftIntensityd aug probability')
-parser.add_argument('--pos_embed', default='perceptron', type=str, help='type of position embedding')
-parser.add_argument('--norm_name', default='instance', type=str, help='normalization layer type in decoder')
-parser.add_argument('--load_weight_name', default='a', type=str, help='trained_weight')
-parser.add_argument('--save_folder', default='a', type=str, help='output_folder')
-parser.add_argument('--model_feature', default=96, type=int, help='model_imbeding_feature size')
-parser.add_argument('--scale_intensity', action='store_true', help='')
-parser.add_argument('--use_smit', default=1, type=int, help='use smit model')
-parser.add_argument('--num_workers', default=0, type=int, help='set number of workers for pytorch dataloader')
+    # Model arguments
+    parser.add_argument("--model_name", default='smit', type=str, help="model name for output directory")
+    parser.add_argument("--pretrained_model_path", default=None, type=str, 
+                        help="path to pretrained model checkpoint")
+    parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
+    parser.add_argument("--out_channels", default=2, type=int, help="number of output channels")
+    parser.add_argument("--norm_name", default="batch", type=str, help="normalization name")
+    parser.add_argument("--use_upernet", action="store_true", help="Use UPERNET decoder")
 
 
-
-# copy spacing and orientation info between sitk objects
-def copy_info(src, dst):
-    dst.SetSpacing(src.GetSpacing())
-    dst.SetOrigin(src.GetOrigin())
-    dst.SetDirection(src.GetDirection())
-
-    return dst
-
-#Additional functions to filter out the body 
-
-
-# thresholding the intensity values to get a binary mask of the patient
-def fg_mask2d(img_2d, thresh): # 
-    mask_map = np.float32(img_2d > thresh)
+    # Preprocessing arguments
+    parser.add_argument("--a_min", default=-175.0, type=float, help="a_min in ScaleIntensityRanged")
+    parser.add_argument("--a_max", default=250.0, type=float, help="a_max in ScaleIntensityRanged")
+    parser.add_argument("--b_min", default=0.0, type=float, help="b_min in ScaleIntensityRanged")
+    parser.add_argument("--b_max", default=1.0, type=float, help="b_max in ScaleIntensityRanged")
+    parser.add_argument("--space_x", default=1.0, type=float, help="spacing in x direction")
+    parser.add_argument("--space_y", default=1.0, type=float, help="spacing in y direction")
+    parser.add_argument("--space_z", default=1.0, type=float, help="spacing in z direction")
+    parser.add_argument("--roi_x", default=96, type=int, help="roi size in x direction")
+    parser.add_argument("--roi_y", default=96, type=int, help="roi size in y direction")
+    parser.add_argument("--roi_z", default=96, type=int, help="roi size in z direction")
     
-    def getLargestCC(segmentation): # largest connected components
-        labels = label(segmentation)
-        assert( labels.max() != 0 ) # assume at least 1 CC
-        largestCC = labels == np.argmax(np.bincount(labels.flat)[1:])+1
-        return largestCC
-    if mask_map.max() < 0.999:
-        return mask_map
-    else:
-        post_mask = getLargestCC(mask_map)
-        fill_mask = snm.binary_fill_holes(post_mask)
-    return fill_mask
-	
-	
-def Get_body_wrapper(img, verbose = False, fg_thresh = 1e-4):
+    # Inference arguments
+    parser.add_argument("--infer_overlap", default=0.5, type=float, 
+                        help="sliding window inference overlap")
+    parser.add_argument("--sw_batch_size", default=16, type=int, 
+                        help="sliding window batch size")
+    parser.add_argument("--use_tta", action="store_true", 
+                        help="use test-time augmentation (horizontal flip)")
     
-    fg_mask_vol = np.zeros(img.shape)
-    for ii in range(fg_mask_vol.shape[0]):
-        if verbose:
-            print("doing {} slice".format(ii))
-        _fgm = fg_mask2d(img[ii, ...], fg_thresh )
+    # Orientation argument
+    parser.add_argument("--skip_orientation", action="store_true",
+                        help="skip Orientationd transform (for datasets already in correct orientation)")
+    
+    # Post-processing arguments
+    parser.add_argument("--postproc", default="standard", 
+                        choices=['standard', 'conf_threshold'],
+                        help="post-processing method: standard (argmax) or conf_threshold")
+    parser.add_argument("--conf_threshold", default=0.70, type=float, 
+                        help="confidence threshold when using conf_threshold post-processing")
+
+    # Distributed arguments
+    parser.add_argument("--distributed", action="store_true", help="use distributed inference")
+    parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
+    parser.add_argument("--rank", default=0, type=int, help="rank of the process")
+    parser.add_argument("--local_rank", default=0, type=int, help="local rank for distributed training")
+    parser.add_argument("--dist_url", default="env://", type=str, help="url for distributed training")
+    parser.add_argument("--dist_backend", default="nccl", type=str, help="distributed backend")
+
+    return parser
+
+
+def setup_distributed(args):
+    """Initialize distributed environment."""
+    if args.distributed:
+        if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+            args.rank = int(os.environ["RANK"])
+            args.world_size = int(os.environ["WORLD_SIZE"])
+            args.local_rank = int(os.environ["LOCAL_RANK"])
+        else:
+            print("Distributed environment variables not set. Using single GPU.")
+            args.distributed = False
+            return
         
-
-        fg_mask_vol[ii] = _fgm
+        torch.cuda.set_device(args.local_rank)
+        dist.init_process_group(
+            backend=args.dist_backend,
+            init_method=args.dist_url,
+            world_size=args.world_size,
+            rank=args.rank
+        )
+        dist.barrier()
         
-    return fg_mask_vol
-	
+        if args.rank == 0:
+            print(f"Distributed initialized: world_size={args.world_size}")
 
-def main():
-    args = parser.parse_args()
 
-    num_workers = args.num_workers
-    img_folder = args.data_dir
-    save_folder = args.save_folder
-    if not os.path.exists(save_folder):
-        os.makedirs(save_folder)
+def cleanup_distributed():
+    """Clean up distributed environment."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
-    data_dir = args.data_dir
-    datalist_json = os.path.join(args.data_dir, 'data.json')
 
+def is_main_process(args):
+    """Check if this is the main process."""
+    return not args.distributed or args.rank == 0
+
+
+def create_transforms(args):
+    """Create preprocessing and post-processing transforms."""
     
-    val_org_transforms = Compose(
-        [
-            LoadImaged(keys=["image"]),
-            EnsureChannelFirstd(keys=["image"]),
-            PercentileClipRescale(keys=["image"], percentile=99.5, rescale_max=1000),
-            Spacingd(keys=["image"],
-                        pixdim=(args.space_x, args.space_y, args.space_z),
-                        mode="bilinear"),
-            Orientationd(keys=["image"], axcodes="RAS"),
-            ScaleIntensityRanged(
-                keys=["image"], a_min=args.a_min, a_max=args.a_max,
-                b_min=0.0, b_max=1.0, clip=True,
-            ),
-            CropForegroundd(keys=["image"], source_key="image"),
-            SpatialPadd(keys=["image"], spatial_size=(args.roi_x, args.roi_y, args.roi_z)),
-
-            EnsureTyped(keys=["image"]),
-        ]
-    )
+    transform_list = [
+        transforms.LoadImaged(keys=["image"]),
+        transforms.AddChanneld(keys=["image"]),
+    ]
     
-
-    test_files = load_decathlon_datalist(datalist_json,
-                                         True,
-                                         "val",
-                                         base_dir=data_dir)
-
-    val_org_ds = data.Dataset(data=test_files, transform=val_org_transforms)
-    val_org_loader = data.DataLoader(val_org_ds, batch_size=1, num_workers=num_workers)
-
-    print('val data size is ', len(val_org_loader))
-    post_transforms = Compose([
-        EnsureTyped(keys="pred"),
-        Invertd(
+    if not args.skip_orientation:
+        transform_list.append(
+            transforms.Orientationd(keys=["image"], axcodes="RAS")
+        )
+    
+    transform_list.extend([
+        transforms.Spacingd(
+            keys=["image"], 
+            pixdim=(args.space_x, args.space_y, args.space_z), 
+            mode=("bilinear")
+        ),
+        transforms.ScaleIntensityRanged(
+            keys=["image"], 
+            a_min=args.a_min, a_max=args.a_max, 
+            b_min=args.b_min, b_max=args.b_max, 
+            clip=True
+        ),
+        transforms.CropForegroundd(keys=["image"], source_key="image"),
+        transforms.SpatialPadd(keys=["image"], spatial_size=(args.roi_x, args.roi_y, 0)),
+        transforms.SpatialPadd(keys=["image"], spatial_size=(0, 0, args.roi_z), method='end'),
+        transforms.ToTensord(keys=["image"]),
+    ])
+    
+    test_transform = transforms.Compose(transform_list)
+    
+    post_transforms = transforms.Compose([
+        transforms.EnsureTyped(keys="pred"),
+        transforms.Invertd(
             keys="pred",
-            transform=val_org_transforms,
+            transform=test_transform,
             orig_keys="image",
             meta_keys="pred_meta_dict",
             orig_meta_keys="image_meta_dict",
             meta_key_postfix="meta_dict",
             nearest_interp=True,
             to_tensor=True,
-        ),
-        AsDiscreted(keys="pred", argmax=True),
-
+        )
     ])
+    
+    return test_transform, post_transforms
 
-    args.test_mode = True
-    val_loader = val_org_loader
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if args.use_smit == 1:
-        config = CONFIGS_SMIT['SMIT_config']
+def load_model(args, device):
+    if args.model_name == 'smit':
+        config = configs_smit.get_SMIT_128_bias_True_upernet() if args.use_upernet else configs_smit.get_SMIT_128_bias_True()
         model = smit.SMIT_3D_Seg(config,
                                  out_channels=args.out_channels,
-                                 norm_name='instance')
-    else:
-        model = smit_plus.SMIT_Plus(out_channels=args.out_channels,
-                                    in_channels=args.in_channels,
-                                    norm_name='instance',
-                                    feature_size=args.model_feature)
-
-    model_dict = torch.load(args.load_weight_name)
-
-    print('info: started to load weight: ', args.load_weight_name)
-    print('info: model emb feature is : ', args.model_feature)
-    model.load_state_dict(model_dict['state_dict'], strict=True)
+                                 img_size=(args.roi_x, args.roi_y, args.roi_z),
+                                 norm_name=args.norm_name)
+    elif args.model_name == 'swinunetr':
+        from models import swin_nvidia
+        model = swin_nvidia.SwinUNETR(
+            img_size=(args.roi_x, args.roi_y, args.roi_z),
+            in_channels=args.in_channels,
+            out_channels=args.out_channels,
+            feature_size=48,  # or add as arg
+            norm_name=args.norm_name,
+        )
+    # rest of checkpoint loading stays identical...
+    
+    checkpoint = torch.load(args.pretrained_model_path, map_location="cpu")
+    model_dict = checkpoint.get("state_dict", checkpoint)
+    
+    # Handle DDP state dict
+    new_state_dict = {}
+    for k, v in model_dict.items():
+        new_key = k.replace("module.", "") if k.startswith("module.") else k
+        new_state_dict[new_key] = v
+    
+    model.load_state_dict(new_state_dict, strict=True)
     model.eval()
     model.to(device)
-    print('info: Successfully loaded trained weights: ', args.load_weight_name)
+    
+    return model
 
+
+def run_inference_with_tta(model, val_inputs, args):
+    """Run inference with optional test-time augmentation."""
+    if not args.use_tta:
+        pred = sliding_window_inference(
+            inputs=val_inputs,
+            roi_size=(args.roi_x, args.roi_y, args.roi_z),
+            sw_batch_size=args.sw_batch_size,
+            predictor=model,
+            overlap=args.infer_overlap,
+            mode="gaussian",
+            progress=False
+        )
+        return pred
+    
+    preds = []
+    for do_flip in [False, True]:
+        aug_inputs = val_inputs
+        
+        # Apply flip
+        if do_flip:
+            aug_inputs = Flip(spatial_axis=1)(aug_inputs)
+        
+        # Run inference
+        pred = sliding_window_inference(
+            inputs=aug_inputs,
+            roi_size=(args.roi_x, args.roi_y, args.roi_z),
+            sw_batch_size=args.sw_batch_size,
+            predictor=model,
+            overlap=args.infer_overlap,
+            mode="gaussian",
+            progress=False
+        )
+        
+        # Invert flip
+        if do_flip:
+            pred = Flip(spatial_axis=1)(pred)
+        
+        preds.append(pred)
+    
+    return torch.mean(torch.stack(preds), dim=0)
+
+def apply_postprocessing(pred_t, args):
+    """Apply post-processing to get final segmentation labels."""
+    if args.postproc == 'standard':
+        pred_labels = torch.argmax(pred_t, dim=0).to(torch.int64)
+    else:
+        probs = torch.softmax(pred_t, dim=0)
+        conf, pred_labels = torch.max(probs, dim=0)
+        pred_labels[conf < args.conf_threshold] = 0
+        pred_labels = pred_labels.to(torch.int64)
+    
+    return pred_labels
+
+
+def process_dataset(dataset_name, args, model, test_transform, post_transforms, device):
+    """Process a single dataset."""
+    if is_main_process(args):
+        print(f'Working on: {dataset_name}')
+    
+    output_directory = os.path.join(
+        args.results_dir, 
+        args.output_dir,
+        args.model_name,
+        dataset_name
+    )
+    
+    if is_main_process(args):
+        os.makedirs(output_directory, exist_ok=True)
+    
+    if args.distributed:
+        dist.barrier()
+    
+    datalist_json = os.path.join(args.data_dir, args.json_list)
+    test_files = load_decathlon_datalist(
+        datalist_json, 
+        True, 
+        dataset_name, 
+        base_dir=args.data_dir
+    )
+    
+    test_ds = data.Dataset(test_files, transform=test_transform)
+    
+    # Use distributed sampler if distributed
+    if args.distributed:
+        sampler = DistributedSampler(test_ds, shuffle=False)
+    else:
+        sampler = None
+    
+    test_loader = data.DataLoader(
+        test_ds, 
+        batch_size=1, 
+        shuffle=False,
+        sampler=sampler,
+        pin_memory=True
+    )
+    
+    # Progress bar only on main process
+    if is_main_process(args):
+        loader_iter = tqdm(test_loader, desc=f"{dataset_name}")
+    else:
+        loader_iter = test_loader
+    
     with torch.no_grad():
-        for i, val_data in enumerate(val_loader):
-            val_inputs = val_data["image"].cuda()
-
-            img_name = val_data['image_meta_dict']['filename_or_obj'][0].split('/')[-1]
-
-            with autocast(enabled=True):
-                val_data["pred"] = sliding_window_inference(val_inputs,
-                                                            (args.roi_x, args.roi_y, args.roi_z),
-                                                            4,
-                                                            model,
-                                                            overlap=args.infer_overlap)
-
-            val_data = [post_transforms(i) for i in decollate_batch(val_data)]
-
-            val_outputs = from_engine(["pred"])(val_data)
-
-            val_outputs = val_outputs[0]
-
-            seg_ori_size = val_outputs.numpy().astype(np.uint8)
-            seg_ori_size = np.squeeze(seg_ori_size)
-
-            pred_sv_name = os.path.join(save_folder, os.path.split(args.load_weight_name)[-1].replace('.pt', '') + '_' + img_name)
-
-            print('info: start get the info')
-
-            #Start to filter the body 
-            cur_rd_path = os.path.join(img_folder, img_name)
-            im_obj = sitk.ReadImage(cur_rd_path)
-            img_3d_data=sitk.GetArrayFromImage(im_obj)
-            threshold_= -150
-            out_fg= Get_body_wrapper(img_3d_data, fg_thresh = threshold_)
-            out_fg=np.transpose(out_fg, (2, 1, 0))
-            seg_ori_size[out_fg==0]=0
-            seg_ori_size = np.transpose(seg_ori_size, (2, 1, 0))
-            out_fg_o = sitk.GetImageFromArray(seg_ori_size)
-            seg_ori_size = copy_info(im_obj, out_fg_o)
-            sitk.WriteImage(seg_ori_size, pred_sv_name)
+        for i, batch in enumerate(loader_iter):
+            try:
+                val_inputs = batch["image"].to(device)
+                
+                img_name = batch["image_meta_dict"]["filename_or_obj"][0]
+                img_name = make_seg_filename(img_name)
+                
+                batch["pred"] = run_inference_with_tta(model, val_inputs, args)
+                
+                batch = [post_transforms(i) for i in decollate_batch(batch)]
+                
+                b0 = batch[0]
+                pred_t = b0['pred']
+                pred_labels = apply_postprocessing(pred_t, args)
+                
+                seg_np = pred_labels.cpu().numpy().astype(np.uint8)
+                affine = b0["image_meta_dict"].get("original_affine", np.eye(4))
+                
+                output_path = os.path.join(output_directory, img_name)
+                nib.save(nib.Nifti1Image(seg_np, affine), output_path)
+                
+            except Exception as e:
+                print(f"\n[Rank {args.rank}] Error processing {batch['image_meta_dict']['filename_or_obj'][0]}: {e}")
+                continue
+    
+    if args.distributed:
+        dist.barrier()
+    
+    if is_main_process(args):
+        print(f"Completed: {dataset_name}\n")
 
 
-if __name__ == '__main__':
+def main():
+    parser = setup_argparser()
+    args = parser.parse_args()
+    
+    # Setup distributed
+    setup_distributed(args)
+    
+    # Set device
+    if args.distributed:
+        device = torch.device(f"cuda:{args.local_rank}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    if is_main_process(args):
+        print("=" * 60)
+        print("Inference Configuration")
+        print("=" * 60)
+        for arg in vars(args):
+            print(f"  {arg}: {getattr(args, arg)}")
+        print(f"\nDevice: {device}")
+        print(f"Distributed: {args.distributed}")
+        if args.distributed:
+            print(f"World size: {args.world_size}")
+        print(f"Orientation transform: {'SKIPPED' if args.skip_orientation else 'RAS'}")
+        print(f"TTA: {args.use_tta}")
+        print("=" * 60 + "\n")
+    
+    test_transform, post_transforms = create_transforms(args)
+    
+    if is_main_process(args):
+        print("Loading model...")
+    
+    model = load_model(args, device)
+    
+    if is_main_process(args):
+        print(f"Model: {args.model_name}")
+        print(f"Output channels: {args.out_channels}")
+        print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+        print(f"Post-processing: {args.postproc}")
+        if args.postproc == 'conf_threshold':
+            print(f"Confidence threshold: {args.conf_threshold}")
+        print()
+    
+    for dataset_name in args.datasets:
+        process_dataset(
+            dataset_name, 
+            args, 
+            model, 
+            test_transform, 
+            post_transforms, 
+            device
+        )
+    
+    cleanup_distributed()
+    
+    if is_main_process(args):
+        print("Inference completed successfully!")
+
+
+if __name__ == "__main__":
     main()
-
