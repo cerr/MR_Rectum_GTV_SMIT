@@ -13,7 +13,7 @@ from monai import data, transforms
 from monai.data import load_decathlon_datalist, decollate_batch
 from monai.transforms import Flip
 from monai.inferers import sliding_window_inference
-from models import smit, configs_smit
+from smit_models import smit, configs_smit
 
 from tqdm import tqdm
 
