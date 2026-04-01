@@ -23,9 +23,12 @@ python utils/gen_data_json.py $data_dir
 
 python run_segmentation_rectum.py \
     --data_dir $data_dir \
+    --json_list data.json \
+    --datasets val \
     --pretrained_model_path $load_weight_name \
     --results_dir $save_folder \    
     --out_channels 2 \
+    --norm_name instance \ 
     --a_min 0 --a_max 1000 \
     --space_x 1.5 --space_y 1.5 --space_z 2.0 \
     --roi_x 128 --roi_y 128 --roi_z 64
