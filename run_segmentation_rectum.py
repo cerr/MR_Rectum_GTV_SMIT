@@ -239,7 +239,6 @@ def run_inference_with_tta(model, val_inputs, args):
             predictor=model,
             overlap=args.infer_overlap,
             mode="gaussian",
-            progress=False
         )
         return pred
     
@@ -259,7 +258,6 @@ def run_inference_with_tta(model, val_inputs, args):
             predictor=model,
             overlap=args.infer_overlap,
             mode="gaussian",
-            progress=False
         )
         
         # Invert flip
@@ -288,12 +286,7 @@ def process_dataset(dataset_name, args, model, test_transform, post_transforms, 
     if is_main_process(args):
         print(f'Working on: {dataset_name}')
     
-    output_directory = os.path.join(
-        args.results_dir, 
-        args.output_dir,
-        args.model_name,
-        dataset_name
-    )
+    output_directory = args.output_dir 
     
     if is_main_process(args):
         os.makedirs(output_directory, exist_ok=True)
