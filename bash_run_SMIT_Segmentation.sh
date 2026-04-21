@@ -25,11 +25,16 @@ python run_segmentation_rectum.py \
     --data_dir $data_dir \
     --json_list data.json \
     --datasets val \
+    --model_name smit \
     --pretrained_model_path $load_weight_name \
-    --results_dir $save_folder \    
+    --results_dir $save_folder \
+    --in_channels 1 \    
     --out_channels 2 \
     --norm_name instance \ 
-    --a_min 0 --a_max 1000 \
-    --space_x 1.5 --space_y 1.5 --space_z 2.0 \
-    --roi_x 128 --roi_y 128 --roi_z 64
+    --a_min 0 --a_max 800 \
+    --b_min 0.0 --b_max 1.0 \
+    --space_x 1.0 --space_y 1.0 --space_z 1.0 \
+    --roi_x 128 --roi_y 128 --roi_z 64 \
+    --infer_overlap 0.5 --sw_batch_size 8\
+    --use_tta --postproc standard
 
