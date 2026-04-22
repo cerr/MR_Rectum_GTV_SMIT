@@ -11,11 +11,30 @@ from torch.utils.data.distributed import DistributedSampler
 
 from monai import data, transforms
 from monai.data import load_decathlon_datalist, decollate_batch
-from monai.transforms import Flip
+from monai.transforms import Flip, MapTransform
 from monai.inferers import sliding_window_inference
 from smit_models import smit, configs_smit
 
 from tqdm import tqdm
+
+
+class PercentileClipRescale(MapTransform):
+    def __init__(self, keys, percentile=99.5, rescale_max=1000):
+        super().__init__(keys)
+        self.percentile = percentile
+        self.rescale_max = rescale_max
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.keys:
+            image = d[key]
+            image_np = image.astype(np.float32)
+            perc_val = np.percentile(image_np, self.percentile)
+            image_np = np.clip(image_np, a_min=None, a_max=perc_val)
+            image_np = (image_np / perc_val) * self.rescale_max
+            d[key] = image_np.astype(np.int16)
+        return d
+
 
 
 def get_key_name_part(path, min_len=4):
@@ -150,24 +169,25 @@ def create_transforms(args):
     
     transform_list = [
         transforms.LoadImaged(keys=["image"]),
-        transforms.AddChanneld(keys=["image"]),
+        transforms.EnsureChannelFirstd(keys=["image"]),
+        PercentileClipRescale(keys=["image"], percentile=99.5, rescale_max=1000),
+        transforms.Spacingd(
+            keys=["image"],
+            pixdim=(args.space_x, args.space_y, args.space_z),
+            mode="bilinear"
+        ),
     ]
-    
+
     if not args.skip_orientation:
         transform_list.append(
             transforms.Orientationd(keys=["image"], axcodes="RAS")
         )
-    
+
     transform_list.extend([
-        transforms.Spacingd(
-            keys=["image"], 
-            pixdim=(args.space_x, args.space_y, args.space_z), 
-            mode=("bilinear")
-        ),
         transforms.ScaleIntensityRanged(
-            keys=["image"], 
-            a_min=args.a_min, a_max=args.a_max, 
-            b_min=args.b_min, b_max=args.b_max, 
+            keys=["image"],
+            a_min=args.a_min, a_max=args.a_max,
+            b_min=args.b_min, b_max=args.b_max,
             clip=True
         ),
         transforms.CropForegroundd(keys=["image"], source_key="image"),
@@ -286,7 +306,7 @@ def process_dataset(dataset_name, args, model, test_transform, post_transforms, 
     if is_main_process(args):
         print(f'Working on: {dataset_name}')
     
-    output_directory = args.output_dir 
+    output_directory = args.results_dir
     
     if is_main_process(args):
         os.makedirs(output_directory, exist_ok=True)
@@ -342,7 +362,7 @@ def process_dataset(dataset_name, args, model, test_transform, post_transforms, 
                 
                 seg_np = pred_labels.cpu().numpy().astype(np.uint8)
                 affine = b0["image_meta_dict"].get("original_affine", np.eye(4))
-                
+
                 output_path = os.path.join(output_directory, img_name)
                 nib.save(nib.Nifti1Image(seg_np, affine), output_path)
                 
@@ -418,3 +438,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
