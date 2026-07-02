@@ -8,14 +8,14 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 from monai import data, transforms
 from monai.data import load_decathlon_datalist, decollate_batch
 from monai.transforms import Flip, MapTransform
 from monai.inferers import sliding_window_inference
 from smit_models import smit, configs_smit
-
-from tqdm import tqdm
+from utils.gen_data_json import main as gen_data_json
 
 
 class PercentileClipRescale(MapTransform):
@@ -380,7 +380,14 @@ def process_dataset(dataset_name, args, model, test_transform, post_transforms, 
 def main():
     parser = setup_argparser()
     args = parser.parse_args()
-    
+
+    # Model path
+    args.pretrained_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model_final.pt')
+
+
+    # Generate data JSON
+    gen_data_json(args.data_dir) 
+
     # Setup distributed
     setup_distributed(args)
     
