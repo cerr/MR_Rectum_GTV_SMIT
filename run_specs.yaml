@@ -1,0 +1,117 @@
+metadata:
+    model_name: "MR_Rectum_GTV_SMIT"
+    version: "1.0.0"
+
+execution:
+    single:
+        description: "Run rectal GTV segmentation on a single MR scan."
+        entrypoint: "run_segmentation_rectum.py"
+        arguments:
+            - name: "data_dir"
+              type: "flag"
+              flag_string: "--data_dir"
+              required: true
+            - name: "results_dir"
+              type: "flag"
+              flag_string: "--results_dir"
+              required: true
+            - name: "json_list"
+              type: "flag"
+              flag_string: "--json_list"
+              required: false
+              default: "data.json"
+            - name: "datasets"
+              type: "flag"
+              flag_string: "--datasets"
+              required: false
+              default: "val"
+            - name: "model_name"
+              type: "flag"
+              flag_string: "--model_name"
+              required: false
+              default: "smit"
+            - name: "in_channels"
+              type: "flag"
+              flag_string: "--in_channels"
+              required: false
+              default: "1"
+            - name: "out_channels"
+              type: "flag"
+              flag_string: "--out_channels"
+              required: false
+              default: "2"
+            - name: "norm_name"
+              type: "flag"
+              flag_string: "--norm_name"
+              required: false
+              default: "instance"
+            - name: "a_min"
+              type: "flag"
+              flag_string: "--a_min"
+              required: false
+              default: "0"
+            - name: "a_max"
+              type: "flag"
+              flag_string: "--a_max"
+              required: false
+              default: "800"
+            - name: "b_min"
+              type: "flag"
+              flag_string: "--b_min"
+              required: false
+              default: "0.0"
+            - name: "b_max"
+              type: "flag"
+              flag_string: "--b_max"
+              required: false
+              default: "1.0"
+            - name: "space_x"
+              type: "flag"
+              flag_string: "--space_x"
+              required: false
+              default: "1.0"
+            - name: "space_y"
+              type: "flag"
+              flag_string: "--space_y"
+              required: false
+              default: "1.0"
+            - name: "space_z"
+              type: "flag"
+              flag_string: "--space_z"
+              required: false
+              default: "1.0"
+            - name: "roi_x"
+              type: "flag"
+              flag_string: "--roi_x"
+              required: false
+              default: "128"
+            - name: "roi_y"
+              type: "flag"
+              flag_string: "--roi_y"
+              required: false
+              default: "128"
+            - name: "roi_z"
+              type: "flag"
+              flag_string: "--roi_z"
+              required: false
+              default: "64"
+            - name: "infer_overlap"
+              type: "flag"
+              flag_string: "--infer_overlap"
+              required: false
+              default: "0.5"
+            - name: "sw_batch_size"
+              type: "flag"
+              flag_string: "--sw_batch_size"
+              required: false
+              default: "8"
+            - name: "use_tta"
+              type: "boolean_flag"
+              flag_string: "--use_tta"
+              required: false
+              default: true
+            - name: "postproc"
+              type: "flag"
+              flag_string: "--postproc"
+              required: false
+              default: "standard"
