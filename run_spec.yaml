@@ -1,17 +1,22 @@
 metadata:
     model_name: "MR_Rectum_GTV_SMIT"
-    version: "1.0.0"
+    version: "3.0"
+
+preprocessing:
+    script: "MR_Rectum_GTV_SMIT.py"
+
+postprocessing:
+    script: "MR_Rectum_GTV_SMIT.py"
 
 execution:
-    single:
-        description: "Run rectal GTV segmentation on a single MR scan."
-        entrypoint: "run_segmentation_rectum.py"
-        arguments:
-            - name: "data_dir"
+    description: "Run rectal GTV segmentation on a single MR scan."
+    entrypoint: "run_segmentation_rectum.py"
+    arguments:
+            - name: "input_path"
               type: "flag"
               flag_string: "--data_dir"
               required: true
-            - name: "results_dir"
+            - name: "output_path"
               type: "flag"
               flag_string: "--results_dir"
               required: true
